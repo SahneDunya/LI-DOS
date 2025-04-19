@@ -1,209 +1,261 @@
 // vsprintf.c
-// Lİ-DOS Formatlı String Yazdırma Yardımcısı
+// Lİ-DOS Kernel Formatli Cikti Modulu Implementasyonu
 // Yazar: Sahne Dünya
 // Hedef: 16-bit Real Mode, Intel 8086+, C89
-// Amac: vsprintf fonksiyonunun minimal implementasyonu.
-// printk gibi fonksiyonlar bu dosyayi kullanir.
 
-#include "types.h" // Temel türler
-#include "vsprintf.h" // vsprintf bildirimi ve va_list tanımlarını içerir.
-                      // va_list, va_start, va_arg, va_end makrolari burada tanimli olmali.
+#include "vsprintf.h" // vsprintf arayuzu
+#include "va_list.h"  // Variadic arguman makrolari
+// #include "console.h" // Debug icin console_putc kullanilabilir
 
-// vsprintf.h ornegi (va_list tanimlarini icermeli):
- #ifndef _VSPRINTF_H
- #define _VSPRINTF_H
- #include "types.h" // size_t icin
-// // va_list tanimlari - stdarg.h yerine mimariye ozel implementasyon
- typedef char *va_list;
- #define va_start(ap, last) (ap = (va_list)&last + sizeof(last))
- #define va_arg(ap, type) (ap += sizeof(type), *(type *)(ap - sizeof(type)))
- #define va_end(ap)
-//
- extern int vsprintf(char *buffer, const char *format, va_list va);
- #endif // _VSPRINTF_H
+// --- Yardimci Fonksiyonlar ---
 
-
-// --- Sayiyi Stringe Cevirme Yardimcilari ---
-// Bu fonksiyonlar vsprintf'in ihtiyac duyduğu yardımcı fonksiyonlardır.
-// vsprintf.c içinde static olarak tanımlanabilirler.
-static void reverse_string(char *str) {
-    int len = 0;
-    char *s = str;
-    char temp;
-    while(*s != '\0') { len++; s++; } // strlen implementasyonu
-    int i, j;
-    for (i = 0, j = len - 1; i < j; i++, j--) {
-        temp = str[i];
-        str[i] = str[j];
-        str[j] = temp;
-    }
-}
-
-// İşaretsiz sayıyı stringe çevirir (decimal veya hex)
-// buffer: Sonuç stringin yazılacağı buffer (yeterince büyük olmalı)
-// base: Sayı sistemi tabanı (10 veya 16)
-// Donus: buffer'in baslangic adresi
-static char *uint_to_string(unsigned long value, char *buffer, int base) { // long kullanimi 32-bit adres icin
-    char digits[] = "0123456789ABCDEF"; // Rakam karakterleri
+// Bir stringi tersine cevirir (integer'dan stringe cevirme icin)
+static void reverse(char *buf, int len) {
     int i = 0;
-    unsigned long temp = value; // temp long olmalı
-
-    // Sıfır özel durum
-    if (temp == 0) {
-        buffer[i++] = '0';
-        buffer[i] = '\0';
-        return buffer;
+    int j = len - 1;
+    char temp;
+    while (i < j) {
+        temp = buf[i];
+        buf[i] = buf[j];
+        buf[j] = temp;
+        i++;
+        j--;
     }
-
-    // Sayıyı basamaklarına ayır ve ters sırada buffera yaz
-    while (temp != 0) {
-        buffer[i++] = digits[temp % base];
-        temp /= base;
-    }
-    buffer[i] = '\0'; // Stringi sonlandır
-
-    reverse_string(buffer); // Stringi ters çevir
-
-    return buffer; // Bufferin basini dondur
 }
 
-// İşaretli sayıyı stringe çevirir (decimal)
-static char *int_to_string(int value, char *buffer, int base) {
-    // Sadece base 10 desteklenir
-    if (base != 10) return buffer; // Hata veya varsayılan
+// Isaretli (signed) long tipindeki bir sayiyi stringe cevirir.
+// value: Cevrilecek sayi.
+// buf: Sonucun yazilacagi buffer.
+// base: Sayi sistemi tabani (10, 16, 8).
+// Donus degeri: Yazilan karakter sayisi.
+static int long_to_string(long value, char *buf, int base) {
+    int i = 0;
+    int is_negative = 0;
+    unsigned long temp_val; // Hesaplamalar icin isaretsiz kopya
 
-    if (value < 0) {
-        *buffer++ = '-';
-        value = -value; // Pozitif yap
+    if (value == 0) {
+        buf[i++] = '0';
+        buf[i] = '\0';
+        return 1;
     }
-    // İşaretsiz çeviriciyi çağır
-    uint_to_string((unsigned int)value, buffer, 10); // int'i unsigned int'e cast
-                                                    // Dikkat: 16-bit int Max 32767, uint 65535.
-                                                    // vsprintf'in %d'si stackten int okur, %u stackten unsigned int.
-                                                    // vsprintf cagirirken intler otomatik olarak int olarak itilir,
-                                                    // %d icin va_arg(va, int), %u icin va_arg(va, unsigned int)
-                                                    // %p icin va_arg(va, void*). 16-bitte far pointer 32-bit, bu yuzden uint_to_string long almalı.
 
+    if (base == 10 && value < 0) {
+        is_negative = 1;
+        temp_val = (unsigned long)-value; // Negatif degeri pozitif yap
+    } else {
+        temp_val = (unsigned long)value;
+    }
 
-    return buffer; // Yazmaya basladigi yeri dondur (isaretli sayilar icin isaretin sonrasi)
+    // Sayiyi tabana gore rakamlarina ayir
+    while (temp_val != 0) {
+        int rem = temp_val % base;
+        buf[i++] = (rem > 9) ? (rem - 10 + 'a') : (rem + '0'); // 0-9 veya a-f
+        temp_val = temp_val / base;
+    }
+
+    // Negatif ise '-' isaretini ekle (sadece onluk taban)
+    if (is_negative) {
+        buf[i++] = '-';
+    }
+
+    buf[i] = '\0'; // Null terminator ekle
+
+    reverse(buf, i); // Stringi tersine cevir (rakamlar tersten yazildi)
+
+    return i;
 }
 
+// Isaretsiz (unsigned) long tipindeki bir sayiyi stringe cevirir.
+// value: Cevrilecek sayi.
+// buf: Sonucun yazilacagi buffer.
+// base: Sayi sistemi tabani (10, 16, 8, 2).
+// Donus degeri: Yazilan karakter sayisi.
+static int unsigned_long_to_string(unsigned long value, char *buf, int base) {
+    int i = 0;
+    unsigned long temp_val = value;
 
-// vsprintf fonksiyonunun implementasyonu
-// vsprintf: string bufferına formatlı çıktı yazar.
-// buffer: Çıktının yazılacağı hedef buffer.
-// format: Format stringi (örn. "Sayi: %d, Yazi: %s").
-// va: Değişken argüman listesi.
-// Donus degeri: Yazılan karakter sayısı (null terminator hariç).
+    if (temp_val == 0) {
+        buf[i++] = '0';
+        buf[i] = '\0';
+        return 1;
+    }
 
-int vsprintf(char *buffer, const char *format, va_list va) {
-    char *buf_ptr = buffer;
-    char temp_num_buffer[12]; // Sayı çevirimi için geçici buffer (int/uint için yeterli olmalı)
-    char temp_ptr_buffer[9]; // Pointer çevirimi için (32-bit hex: 8 digit + null)
+    // Sayiyi tabana gore rakamlarina ayir
+    while (temp_val != 0) {
+        int rem = temp_val % base;
+        buf[i++] = (rem > 9) ? (rem - 10 + 'a') : (rem + '0'); // 0-9 veya a-f
+        temp_val = temp_val / base;
+    }
 
-    if (!buffer || !format) return 0;
+    buf[i] = '\0'; // Null terminator ekle
 
-    while (*format != '\0') {
-        if (*format == '%') {
-            format++; // '%' işaretini atla
-            switch (*format) {
-                case 'c': // Tek karakter
-                    {
-                        char c = (char)va_arg(va, int); // char int olarak itilir stacke
-                        *buf_ptr++ = c;
+    reverse(buf, i); // Stringi tersine cevir
+
+    return i;
+}
+
+// --- Ana vsprintf Fonksiyonu ---
+// Kernel Safe vsprintf (vsnprintf benzeri) fonksiyonu.
+// Formatli ciktıyı 'buf' bufferina 'size' byte'i gecmeyecek sekilde yazar.
+// fmt: Format stringi.
+// args: va_list'teki argumanlar.
+// Donus degeri: Buffer'a yazilan karakter sayisi (NULL terminator haric).
+// Buffer'in 'size' byte'tan kisa olmasi durumunda tasmayi onler.
+int vsprintf(char *buf, size_t size, const char *fmt, va_list args) {
+    char *str = buf; // Buffer'a yazmak icin pointer
+    int fmt_len = 0; // Formatlanan toplam karakter sayisi (NULL haric)
+    char num_buf[32]; // Sayi cevirme icin gecici buffer (long max hane sayisi + isaret)
+
+    // Buffer gecerlilik kontrolu
+    if (!buf || size == 0) {
+        return 0; // Gecersiz buffer veya boyut
+    }
+    // Buffer'in sonuna NULL terminator icin yer birak
+    size_t max_write_len = size - 1;
+
+    // Format stringi boyunca ilerle
+    while (*fmt != '\0') {
+        if (*fmt == '%') {
+            fmt++; // '%' karakterini atla
+
+            // Eger '%' ile bitti ise veya bilinmeyen format ise
+            if (*fmt == '\0') break;
+
+            // Format belirleyicisini isle
+            switch (*fmt) {
+                case '%': // '%%' -> '%' karakteri
+                    if (fmt_len < max_write_len) {
+                        *str++ = '%';
+                        fmt_len++;
                     }
                     break;
-                case 's': // String
+                case 'c': // '%c' -> Karakter
                     {
-                        char *s = va_arg(va, char *);
-                        if (!s) s = "(null)";
-                        while (*s != '\0') {
-                            *buf_ptr++ = *s++;
+                        char c = (char)VA_ARG(args, int); // char, int olarak itilir stacke
+                        if (fmt_len < max_write_len) {
+                            *str++ = c;
+                            fmt_len++;
                         }
                     }
                     break;
-                case 'd': // Signed Decimal Integer
+                case 's': // '%s' -> String
+                    {
+                        const char *s = VA_ARG(args, const char *); // String pointer
+                        if (s == (const char *)0) s = "(null)"; // NULL pointer durumu
+                        while (*s != '\0') {
+                            if (fmt_len < max_write_len) {
+                                *str++ = *s;
+                                fmt_len++;
+                                s++;
+                            } else {
+                                goto end_formatting; // Buffer doldu, cik
+                            }
+                        }
+                    }
+                    break;
+                case 'd': // '%d' veya '%i' -> Isaretli ondalik integer
                 case 'i':
                     {
-                        int val = va_arg(va, int);
-                        // Sayıyı stringe çevir
-                        int_to_string(val, temp_num_buffer, 10);
-                        // Çevrilen stringi buffer'a kopyala
-                        char *s = temp_num_buffer;
-                        while(*s != '\0') {
-                            *buf_ptr++ = *s++;
+                        int val = VA_ARG(args, int); // int stackte int olarak itilir
+                        int num_len = long_to_string((long)val, num_buf, 10);
+                        // Num_buf'taki stringi ana buffera kopyala
+                        int i;
+                        for (i = 0; i < num_len; i++) {
+                             if (fmt_len < max_write_len) {
+                                 *str++ = num_buf[i];
+                                 fmt_len++;
+                             } else {
+                                 goto end_formatting; // Buffer doldu
+                             }
                         }
                     }
                     break;
-                case 'u': // Unsigned Decimal Integer
+                 case 'u': // '%u' -> Isaretsiz ondalik integer
                     {
-                        unsigned int val = va_arg(va, unsigned int);
-                        // Sayıyı stringe çevir
-                        uint_to_string((unsigned long)val, temp_num_buffer, 10); // uint_to_string long alıyor
-                         char *s = temp_num_buffer;
-                        while(*s != '\0') {
-                            *buf_ptr++ = *s++;
+                        unsigned int val = VA_ARG(args, unsigned int); // unsigned int stackte unsigned int olarak itilir
+                        int num_len = unsigned_long_to_string((unsigned long)val, num_buf, 10);
+                        int i;
+                        for (i = 0; i < num_len; i++) {
+                             if (fmt_len < max_write_len) {
+                                 *str++ = num_buf[i];
+                                 fmt_len++;
+                             } else {
+                                 goto end_formatting; // Buffer doldu
+                             }
                         }
                     }
                     break;
-                case 'x': // Unsigned Hexadecimal Integer (lowercase)
-                case 'X': // Unsigned Hexadecimal Integer (uppercase)
+                 case 'x': // '%x' veya '%X' -> Hexadecimal integer (kucuk harf)
+                 case 'X': // Hexadecimal integer (buyuk harf)
                     {
-                        unsigned int val = va_arg(va, unsigned int);
-                         // Sayıyı hex stringe çevir
-                        uint_to_string((unsigned long)val, temp_num_buffer, 16); // base 16
-
-                        // Büyük/küçük harf desteği eklenebilir (uint_to_string hex karakterleri büyük/küçük üretebilir)
-                         char *s = temp_num_buffer;
-                        while(*s != '\0') {
-                            *buf_ptr++ = *s++;
+                        unsigned int val = VA_ARG(args, unsigned int);
+                        int num_len = unsigned_long_to_string((unsigned long)val, num_buf, 16);
+                        int i;
+                        // '%X' icin buyuk harfe cevirme yapilabilir burada veya unsigned_long_to_string icinde.
+                        // Basitlik icin ornekte kucuk harf ('a-f') kullanildi. Buyuk harf istenirse
+                        // num_buf karakterleri 'a'dan 'f'ye ise 'A'dan 'F'ye cevrilir.
+                        for (i = 0; i < num_len; i++) {
+                             char digit = num_buf[i];
+                             // Eger %X ise ve karakter 'a'-'f' arasindaysa, buyuk harfe cevir.
+                             // if (*fmt == 'X' && digit >= 'a' && digit <= 'f') {
+                             //     digit = digit - 'a' + 'A';
+                             // }
+                             if (fmt_len < max_write_len) {
+                                 *str++ = digit;
+                                 fmt_len++;
+                             } else {
+                                 goto end_formatting; // Buffer doldu
+                             }
                         }
                     }
                     break;
-                 case 'p': // Pointer (Genellikle hex adres olarak)
-                     {
-                         void *ptr = va_arg(va, void *); // Stack'ten 32-bit far pointer okunur
-                         unsigned long val = (unsigned long)ptr; // Pointer'ı unsigned long'a cast et
-
-                         // Pointer adresini hex stringe çevir (32-bit adres için)
-                         uint_to_string(val, temp_ptr_buffer, 16); // Hex çevirici
-
-                         // printk %p için genellikle 0x formatını kullanır.
-                         *buf_ptr++ = '0';
-                         *buf_ptr++ = 'x';
-                         // temp_num_buffer'ı kopyala
-                         char *s = temp_ptr_buffer; // Pointer stringi
-                         // Eğer 32-bit hex 8 haneden az ise başına sıfır ekle
-                         // Bu implementasyon basittir, sıfır doldurma yapmaz.
-                         // Gelişmiş vsprintf'lerde padding/width yönetilir.
-                         // Basitlik icin 8 karakter dondurdugunu varsayalim.
-                         while(*s != '\0') {
-                            *buf_ptr++ = *s++;
+                 case 'o': // '%o' -> Sekizlik (octal) integer
+                    {
+                         unsigned int val = VA_ARG(args, unsigned int);
+                         int num_len = unsigned_long_to_string((unsigned long)val, num_buf, 8);
+                         int i;
+                         for (i = 0; i < num_len; i++) {
+                              if (fmt_len < max_write_len) {
+                                  *str++ = num_buf[i];
+                                  fmt_len++;
+                              } else {
+                                  goto end_formatting; // Buffer doldu
+                              }
                          }
-                     }
-                     break;
-
-                case '%': // %% -> '%' karakteri
-                    *buf_ptr++ = '%';
+                    }
                     break;
-                // ... Diğer format belirteçleri (%f float, %e scientific, padding, width, precision vb.)
-                // Bu minimal implementasyonda desteklenmez.
+                // '%p' (pointer) veya diger format belirleyicileri (genislik, precision, flagler)
+                // daha karmasik implementasyon gerektirir ve bu basit ornekte atlanmistir.
+                // '%p' genellikle adresi hexadecimal yazar, 16-bit Real Mode'da Segment:Offset olarak yazmak faydali olabilir.
+                // Bu da pointerin segment ve offsetini elde etme yollari gerektirir ki va_arg ile dogrudan kolay olmayabilir.
                 default:
-                    // Bilinmeyen format belirteci, olduğu gibi yazdır veya hata ver
-                    *buf_ptr++ = '%'; // Orjinal %
-                    *buf_ptr++ = *format; // Bilinmeyen karakter
+                    // Bilinmeyen format belirleyici, '%' ve karakterin kendisini yaz
+                    if (fmt_len < max_write_len) {
+                        *str++ = '%';
+                        fmt_len++;
+                    }
+                    if (fmt_len < max_write_len) {
+                        *str++ = *fmt;
+                        fmt_len++;
+                    }
                     break;
             }
+            fmt++; // Format belirleyicisinden sonraki karakteri atla
         } else {
-            // Format karakteri değil, olduğu gibi kopyala
-            *buf_ptr++ = *format;
+            // Normal karakter, buffera yaz
+            if (fmt_len < max_write_len) {
+                *str++ = *fmt;
+                fmt_len++;
+            }
+            fmt++; // Sonraki karaktere gec
         }
-        format++; // Bir sonraki format karakterine geç
     }
 
-    *buf_ptr = '\0'; // String sonuna null terminator ekle
+end_formatting:
+    // Buffer sonuna NULL terminator ekle
+    *str = '\0';
 
-    return (int)(buf_ptr - buffer); // Yazılan karakter sayısı (null hariç)
+    return fmt_len; // Yazilan karakter sayisini dondur (NULL haric)
 }
 
 // vsprintf.c sonu
